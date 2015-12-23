@@ -1,5 +1,6 @@
 require 'optim'
 require 'nn'
+torch.setdefaulttensortype('torch.FloatTensor')
 local Controller = require 'controller'
 local Utils = require 'utils'
 local Task = require 'task'
@@ -20,22 +21,22 @@ cmd:option('-rnn_size', 256, 'size of the hidden layer in the controller')
 cmd:option('-memory_size', 256, 'size of individual memories')
 cmd:option('-embedding_size', 64, 'size of integer encoded embeddings')
 cmd:option('-vocab_size', 128, 'number of different symbols for input')
-cmd:option('-use_deque', false, 'boolean indicating if a DeQue memory module is used')
+cmd:option('-use_deque', true, 'boolean indicating if a DeQue memory module is used')
 cmd:option('-memory_types', 's', 'a string indicating what each memory module should be. only specify if -use_deque is not true. string should be same length as -num_memory_modules. example: "sqs" to use 2 Stacks and 1 Queue')
-cmd:option('-task', 'copy', 'task to train on. "copy", "reverse", or "bigramFlip"')
+cmd:option('-task', 'bigramFlip', 'task to train on. "copy", "reverse", or "bigramFlip"')
 -- Hyperparameters.
 cmd:option('-min_train_seq_len', 8, 'minimum length of training sequence.')
-cmd:option('-max_train_seq_len', 64, 'maximum length of training sequence.')
-cmd:option('-min_test_seq_len', 65, 'minimum length of test sequence.')
-cmd:option('-max_test_seq_len', 128, 'maximum length of test sequence.')
+cmd:option('-max_train_seq_len', 32, 'maximum length of training sequence.')
+cmd:option('-min_test_seq_len', 32, 'minimum length of test sequence.')
+cmd:option('-max_test_seq_len', 64, 'maximum length of test sequence.')
 cmd:option('-batch_size', 10, 'size of minibatch')
 cmd:option('-dropout', 0.0, 'dropout probability')
 cmd:option('-learning_rate', 2e-3, 'learning rate for rmsprop')
 cmd:option('-decay_rate', 0.95, 'decay rate for rmsprop')
 cmd:option('-max_grad_norm', 1, 'constrain norm of gradient to be less than this')
-cmd:option('-iterations_per_epoch', 100, 'number of iterations per epoch')
+cmd:option('-iterations_per_epoch', 10, 'number of iterations per epoch')
 cmd:option('-epochs_per_validation', 10, 'number of epochs before computing accuracy')
-cmd:option('-num_accuracy_batches', 100, 'number of batches for computing accuracy')
+cmd:option('-num_accuracy_batches', 10, 'number of batches for computing accuracy')
 cmd:option('-seed', 1, 'random number generator seed')
 -- GPU / CPU
 cmd:option('-gpuid',0,'which gpu to use. -1 = use CPU')
@@ -96,7 +97,7 @@ if string.len(opt.use_checkpoint) > 0 then
     opt.batch_size = checkpoint.opt.batch_size
     opt.memory_types = checkpoint.opt.memory_types
     opt.use_deque = checkpoint.opt.use_deque
-else 
+else
     protos = {}
     if opt.use_deque then
         protos.rnn = Controller.DeQue(opt)
@@ -137,16 +138,16 @@ end
 local function determineInput(inp, prediction, get_argmax)
     if prediction == nil or not get_argmax then
         return inp
-    else 
+    else
         local _, argmax = prediction:max(2)
-        return argmax:double():select(2, 1)
+        return argmax:select(2, 1)
     end
 end
 
 local function correctMetric(no_wrongs, num_correct, y, prediction)
     local _, argmax = prediction:max(2)
-    no_wrongs:cmul(y:eq(argmax:double()))
-    num_correct:add(no_wrongs:double())
+    no_wrongs:cmul(y:eq(argmax))
+    num_correct:add(no_wrongs)
 end
 
 local function forward(x, seq_len, get_argmax)
@@ -169,10 +170,10 @@ local function forward(x, seq_len, get_argmax)
     -- Additional metrics for coarse and fine scores if testing.
     local no_wrongs, num_correct
     if get_argmax then
-        no_wrongs = Utils.gpu(torch.ByteTensor(opt.batch_size):fill(1))
-        num_correct = Utils.gpu(torch.zeros(opt.batch_size))
+        no_wrongs = Utils.gpu(torch.ByteTensor(opt.batch_size):fill(1),opt)
+        num_correct = Utils.gpu(torch.zeros(opt.batch_size),opt)
     end
- 
+
     for t = 0, seq_len do
         local inp = t == 0 and Task.sepToken(opt) or getY(x, t)
         dec_inputs[t] = determineInput(inp, predictions[t - 1], get_argmax)
@@ -183,6 +184,7 @@ local function forward(x, seq_len, get_argmax)
         rnn_states[t + sep_index + 1] = Utils.spliceList(output, 1, #init_state)
         predictions[t] = output[#output]
         local y = t == seq_len and Task.endToken(opt) or getY(x, t + 1)
+
         loss = loss + clones.criterion[t]:forward(predictions[t], y)
         if get_argmax then
             correctMetric(no_wrongs, num_correct, y, predictions[t])
@@ -193,7 +195,7 @@ local function forward(x, seq_len, get_argmax)
 end
 
 local function backward(x, seq_len, rnn_states, dec_inputs, embeddings, predictions)
-    local d_state = Utils.spliceList(rnn_states[#rnn_states], 1, #init_state, true)   
+    local d_state = Utils.spliceList(rnn_states[#rnn_states], 1, #init_state, true)
 
     -- Backward pass over output sequence.
     local sep_index = seq_len + 1
@@ -202,21 +204,21 @@ local function backward(x, seq_len, rnn_states, dec_inputs, embeddings, predicti
         local d_loss = clones.criterion[t]:backward(predictions[t], y)
         table.insert(d_state, d_loss)
         local d_timestep = clones.rnn[t + sep_index]:backward(
-            { embeddings[t + sep_index], unpack(rnn_states[t + sep_index]) }, d_state) 
+            { embeddings[t + sep_index], unpack(rnn_states[t + sep_index]) }, d_state)
         clones.dec_dict[t]:backward(dec_inputs[t], d_timestep[1])
         d_state = Utils.spliceList(d_timestep, 2, #d_timestep)
     end
 
     -- Backward pass over input sequence.
-    local zero_crit = Utils.gpu(torch.zeros(predictions[1]:size()))
+    local zero_crit = Utils.gpu(torch.zeros(predictions[1]:size()),opt)
     for t = seq_len, 0, -1 do
         table.insert(d_state, zero_crit)
         local d_timestep = clones.rnn[t]:backward(
-            { embeddings[t], unpack(rnn_states[t]) }, d_state) 
+            { embeddings[t], unpack(rnn_states[t]) }, d_state)
         local inp = t == 0 and Task.startToken(opt) or x:select(2, t)
         clones.enc_dict[t]:backward(inp, d_timestep[1])
         d_state = Utils.spliceList(d_timestep, 2, #d_timestep)
-    end 
+    end
 end
 
 local function feval(params_)
@@ -227,7 +229,7 @@ local function feval(params_)
 
     local x, seq_len = Task.generateSequence(false, false, opt)
     x = Utils.gpu(x, opt)
-    local rnn_states, predictions, dec_inputs, embeddings, loss = forward(x, seq_len, true) 
+    local rnn_states, predictions, dec_inputs, embeddings, loss = forward(x, seq_len, true)
     backward(x, seq_len, rnn_states, dec_inputs, embeddings, predictions)
 
     loss = loss / (seq_len * opt.batch_size)
@@ -236,7 +238,7 @@ local function feval(params_)
     if grad_norm > opt.max_grad_norm then
         local scaling_factor = opt.max_grad_norm / grad_norm
         grad_params:mul(scaling_factor)
-    end 
+    end
 
     return loss, grad_params
 end
@@ -246,8 +248,8 @@ local function accuracy(is_test)
     local fine = 0
     for i = 1, opt.num_accuracy_batches do
         local x, seq_len = Task.generateSequence(false, is_test, opt)
-        x = Utils.gpu(x)
-        local _, _, _, _, _, num_correct = forward(x, seq_len, true)  
+        x = Utils.gpu(x,opt)
+        local _, _, _, _, _, num_correct = forward(x, seq_len, true)
         coarse = coarse + num_correct:eq(seq_len + 1):sum()
         fine = fine + num_correct:sum() / (seq_len + 1)
     end
@@ -278,21 +280,21 @@ while not converged do
     changeRnnMode(true)
     local timer = torch.Timer()
     for i = 1, opt.iterations_per_epoch do
-        local batch_loss = optim.rmsprop(feval, params, optim_state) 
+        local batch_loss = optim.rmsprop(feval, params, optim_state)
         loss = loss + batch_loss[1]
     end
     local time = timer:time().real
     train_losses[epoch] = loss
-    
+
     print(string.format('epoch %d, loss = %6.8f, grad/param norm = %6.4e, time/batch = %.2fs', epoch, loss, grad_params:norm() / params:norm(), time))
 
     if epoch % opt.epochs_per_validation == 0 then
         changeRnnMode(false)
-        train_accuracy[epoch] = accuracy(false) 
-        test_accuracy[epoch] = accuracy(true) 
+        train_accuracy[epoch] = accuracy(false)
+        test_accuracy[epoch] = accuracy(true)
     end
 
-    if epoch % 5 == 0 then 
+    if epoch % 5 == 0 then
         collectgarbage()
     end
 
@@ -315,7 +317,7 @@ while not converged do
     -- Convergence check
     if epoch > 5 and torch.abs(loss - train_losses[epoch - 5]) < 1e-1 then
         optim_state.learningRate = optim_state.learningRate / 2
-    else if epoch > 10 and torch.abs(loss - train_losses[epoch - 10]) < 1e-3 then
+    elseif epoch > 10 and torch.abs(loss - train_losses[epoch - 10]) < 1e-3 then
         convergence = true
     end
 

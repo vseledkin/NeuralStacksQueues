@@ -159,7 +159,7 @@ function Utils.spliceList(src, first, last, should_zero)
     for i = first, last do
         if should_zero then
             table.insert(dst, src[i]:clone():zero())
-        else 
+        else
             table.insert(dst, src[i])
         end
     end
@@ -168,12 +168,12 @@ end
 
 function Utils.gpu(x, opt)
     if opt.gpuid >= 0 and opt.opencl == 0 then
-        if x:type() == 'torch.IntTensor' then
-            return x:float():cuda()
-        else
+        --if x:type() == 'torch.IntTensor' then
             return x:cuda()
-        end
-    else if opt.gpuid >= and opt.opencl == 1 then
+        --else
+        --    return x:cuda()
+        --end
+		elseif opt.gpuid >= 0 and opt.opencl == 1 then
         return x:cl()
     else
         return x

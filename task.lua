@@ -4,8 +4,8 @@ Task.sep_token_val = 2
 Task.end_token_val = 3
 
 function Task.generateSequence(make_even, is_test, opt)
-    local min_len = is_test and opt.min_test_seq_len or opt.min_train_seq_len 
-    local max_len = is_test and opt.max_test_seq_len or opt.max_train_seq_len 
+    local min_len = is_test and opt.min_test_seq_len or opt.min_train_seq_len
+    local max_len = is_test and opt.max_test_seq_len or opt.max_train_seq_len
     local seq_len = torch.floor(torch.uniform(min_len, max_len + 1))
     if make_even and seq_len % 2 == 1 then
         seq_len = seq_len + 1
@@ -37,24 +37,33 @@ end
 
 function Task.startToken(opt)
     if Task.start_token_tensor == nil then
-        Task.start_token_tensor 
+        Task.start_token_tensor
             = torch.Tensor(opt.batch_size):fill(Task.start_token_val)
+						if opt.gpuid >=0 then
+							Task.start_token_tensor = Task.start_token_tensor:cuda()
+						end
     end
     return Task.start_token_tensor
 end
 
 function Task.sepToken(opt)
     if Task.sep_token_tensor == nil then
-        Task.sep_token_tensor = 
+        Task.sep_token_tensor =
             torch.Tensor(opt.batch_size):fill(Task.sep_token_val)
+						if opt.gpuid >=0 then
+							Task.sep_token_tensor = Task.sep_token_tensor:cuda()
+						end
     end
     return Task.sep_token_tensor
 end
 
 function Task.endToken(opt)
     if Task.end_token_tensor == nil then
-        Task.end_token_tensor 
+        Task.end_token_tensor
             = torch.Tensor(opt.batch_size):fill(Task.end_token_val)
+				if opt.gpuid >=0 then
+					Task.end_token_tensor = Task.end_token_tensor:cuda()
+				end
     end
     return Task.end_token_tensor
 end
